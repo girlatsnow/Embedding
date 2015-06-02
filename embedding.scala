@@ -14,7 +14,7 @@ object embedd {
   val D = 2 //Num of dimensions
   //Num of iterations
   val rand = new Random(42)
-  
+
   val threshold = 10
   case class DataPoint(a: Vector[Double], b: Vector[Double], y: Double)
 
@@ -27,23 +27,23 @@ object embedd {
   def main(args: Array[String]) {
     /*
      * args0: ITER: num of iterations
-     * args1: starting_alpha
-    
-     * args2: output model path
-     * [args3: input model]
+     * args1: starting_alpha    
+     * [args2: input model]
      * */
 
     val ITER = args(0).toInt
     val starting_alpha = args(1).toDouble
     val sc = new SparkContext(new SparkConf().setAppName("embedding"))
     val pdata = sc.textFile("hdfs://cp01.amazingstore.org:9000/user/licui/data/sym_adjlist.graph")
-      .flatMap(line => {val vtxs = line.split(" ").map(v => v.toInt);
-        vtxs.tail.map(v => (vtxs.head, v, 1))      }
-      )
+      .flatMap(line => {
+        val vtxs = line.split("\t").map(v => v.toInt);
+        vtxs.tail.map(v => (vtxs.head, v, 1))
+      })
     val ndata = sc.textFile("hdfs://cp01.amazingstore.org:9000/user/licui/data/sym_adjlist.graph.negative")
-      .flatMap(line => {val vtxs = line.split(" ").map(v => v.toInt);
-        vtxs.tail.map(v => (vtxs.head, v, -1))      }
-      )
+      .flatMap(line => {
+        val vtxs = line.split("\t").map(v => v.toInt);
+        vtxs.tail.map(v => (vtxs.head, v, -1))
+      })
     val data = pdata.union(ndata).cache()
     val N = data.flatMap { v => List(v._1, v._2) }.distinct().count()
     printf("%d %d\n", N, D) //num of vtx, dimension    
@@ -64,11 +64,13 @@ object embedd {
       }
 
     } else {
-      for (i <- 0 to N.toInt - 1) {
-        coordinates += (i -> DenseVector.fill(D) { 2 * rand.nextDouble - 1 }) //(-1,1)
-      }
-    }
 
+      data.flatMap { v => List(v._1, v._2) }.distinct().collect().foreach { v =>
+        coordinates += (v -> DenseVector.fill(D) { 2 * rand.nextDouble - 1 })
+      }
+
+    }
+    Runtime.getRuntime().exec("hadoop fs -rmr /user/licui/out/embedding/")
     var iter = 0
     var isConverge = false
     var oldcost = 0
@@ -79,47 +81,38 @@ object embedd {
 
       println("iteration: " + iter + " alpha: " + alpha)
 
-      val cost = data.map { d =>
-        {
-          val edge = DataPoint(coordinates(d._1), coordinates(d._2), d._3 * 1.0);
-          lbeta(edge.y * ((edge.a.-(edge.b)).dot(edge.a.-(edge.b)) - threshold))
-        }
-      }.reduce(_ + _)
-      println("cost: " + cost)
-      if (abs(oldcost - cost) < 1e-3) {
-        println("Converage at iteration " + iter)
-        isConverge = true;
-      }
-
       val gradient = data.flatMap { d =>
         {
-          val edge = DataPoint(coordinates(d._1), coordinates(d._2), d._2 * 1.0);
+          val edge = DataPoint(coordinates(d._1), coordinates(d._2), d._3 * 1.0);
           val gradient = edge.y * omega(edge.y * ((edge.a.-(edge.b)).dot(edge.a.-(edge.b)) - threshold)) * 2 * (edge.a.-(edge.b))
           List(d._1 -> -1 * alpha * gradient, d._2 -> alpha * gradient)
         }
       }.reduceByKey(_ + _)
       gradient.collect().foreach {
         g => coordinates(g._1) += g._2
-        //println(g)
       }
 
-      //      if(gradient.toArray().forall(v => v._2.forall(v2 =>v2<1e-6)))
-      //        isConverge=true
       iter += 1
-      
-      if (iter % 500 == 0) {
-        val path = "hdfs://cp01.amazingstore.org:9000/user/licui/out/embedding/iter"+iter/500
-        Runtime.getRuntime().exec("hadoop fs -rmr path")
+      if (iter < 10 || iter % 100 == 0) {
+        val cost = data.map { d =>
+          {
+            val edge = DataPoint(coordinates(d._1), coordinates(d._2), d._3 * 1.0);
+            lbeta(edge.y * ((edge.a.-(edge.b)).dot(edge.a.-(edge.b)) - threshold))
+          }
+        }.reduce(_ + _)
+        println("cost: " + cost)
+      }
+
+      if (iter % 100 == 0) {
+        val path = "hdfs://cp01.amazingstore.org:9000/user/licui/out/embedding/iter" + iter / 500
 
         sc.parallelize(coordinates.toSeq).map(v => v._1 + " " + v._2.toArray.mkString(" ")).saveAsTextFile(path)
 
       }
     }
     //val writer = new PrintWriter("/home/licui/code/embedding/embedding.out")
-    sc.parallelize(coordinates.toSeq).map(v => v._1 + " " + v._2.toArray.mkString(" ")).saveAsTextFile("hdfs://cp01.amazingstore.org:9000/user/licui/out/embedding/iter"+iter)
+    sc.parallelize(coordinates.toSeq).map(v => v._1 + " " + v._2.toArray.mkString(" ")).saveAsTextFile("hdfs://cp01.amazingstore.org:9000/user/licui/out/embedding/iter" + iter)
 
-    
-    
   }
 
 }
