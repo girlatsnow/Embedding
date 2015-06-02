@@ -28,24 +28,30 @@ object embedd {
     /*
      * args0: ITER: num of iterations
      * args1: starting_alpha
-     * args2: input sign graph (v1, v2, 1/-1)
-     * args3: output model path
-     * [args4: input model]
+    
+     * args2: output model path
+     * [args3: input model]
      * */
 
     val ITER = args(0).toInt
     val starting_alpha = args(1).toDouble
     val sc = new SparkContext(new SparkConf().setAppName("embedding"))
-    val data = sc.textFile(args(2))
-      .map(line => line.split(" ").map(v => v.toInt)).cache()
-
-    val N = data.flatMap { v => List(v(0), v(1)) }.distinct().count()
+    val pdata = sc.textFile("hdfs://cp01.amazingstore.org:9000/user/licui/data/sym_adjlist.graph")
+      .flatMap(line => {val vtxs = line.split(" ").map(v => v.toInt);
+        vtxs.tail.map(v => (vtxs.head, v, 1))      }
+      )
+    val ndata = sc.textFile("hdfs://cp01.amazingstore.org:9000/user/licui/data/sym_adjlist.graph.negative")
+      .flatMap(line => {val vtxs = line.split(" ").map(v => v.toInt);
+        vtxs.tail.map(v => (vtxs.head, v, -1))      }
+      )
+    val data = pdata.union(ndata).cache()
+    val N = data.flatMap { v => List(v._1, v._2) }.distinct().count()
     printf("%d %d\n", N, D) //num of vtx, dimension    
 
     var coordinates = new scala.collection.mutable.HashMap[Int, Vector[Double]]
 
-    if (args.length == 5) {
-      val initw = sc.textFile(args(4)).map(line => line.split(" ")).map(v => (v(0).toInt -> v.tail.map(a => a.toDouble)))
+    if (args.length == 4) {
+      val initw = sc.textFile(args(3)).map(line => line.split(" ")).map(v => (v(0).toInt -> v.tail.map(a => a.toDouble)))
       println(initw.count())
 
       initw.collect().foreach { w =>
@@ -75,7 +81,7 @@ object embedd {
 
       val cost = data.map { d =>
         {
-          val edge = DataPoint(coordinates(d(0)), coordinates(d(1)), d(2) * 1.0);
+          val edge = DataPoint(coordinates(d._1), coordinates(d._2), d._3 * 1.0);
           lbeta(edge.y * ((edge.a.-(edge.b)).dot(edge.a.-(edge.b)) - threshold))
         }
       }.reduce(_ + _)
@@ -87,9 +93,9 @@ object embedd {
 
       val gradient = data.flatMap { d =>
         {
-          val edge = DataPoint(coordinates(d(0)), coordinates(d(1)), d(2) * 1.0);
+          val edge = DataPoint(coordinates(d._1), coordinates(d._2), d._2 * 1.0);
           val gradient = edge.y * omega(edge.y * ((edge.a.-(edge.b)).dot(edge.a.-(edge.b)) - threshold)) * 2 * (edge.a.-(edge.b))
-          List(d(0) -> -1 * alpha * gradient, d(1) -> alpha * gradient)
+          List(d._1 -> -1 * alpha * gradient, d._2 -> alpha * gradient)
         }
       }.reduceByKey(_ + _)
       gradient.collect().foreach {
@@ -100,20 +106,20 @@ object embedd {
       //      if(gradient.toArray().forall(v => v._2.forall(v2 =>v2<1e-6)))
       //        isConverge=true
       iter += 1
+      
+      if (iter % 500 == 0) {
+        val path = "hdfs://cp01.amazingstore.org:9000/user/licui/out/embedding/iter"+iter/500
+        Runtime.getRuntime().exec("hadoop fs -rmr path")
 
-      if (iter % 100 == 0) {
-        coordinates.foreach {
-          v => println(v._1 + " " + v._2.toArray.mkString(" "))
-        }
+        sc.parallelize(coordinates.toSeq).map(v => v._1 + " " + v._2.toArray.mkString(" ")).saveAsTextFile(path)
+
       }
     }
     //val writer = new PrintWriter("/home/licui/code/embedding/embedding.out")
-    sc.parallelize(coordinates.toSeq).map(v => v._1 + " " + v._2.toArray.mkString(" ")).saveAsTextFile(args(3))
+    sc.parallelize(coordinates.toSeq).map(v => v._1 + " " + v._2.toArray.mkString(" ")).saveAsTextFile("hdfs://cp01.amazingstore.org:9000/user/licui/out/embedding/iter"+iter)
 
-    coordinates.foreach {
-      v => println(v._1 + " " + v._2.toArray.mkString(" "))
-    }
-
+    
+    
   }
 
 }
